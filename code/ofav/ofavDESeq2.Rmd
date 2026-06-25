@@ -43,15 +43,40 @@ Library prep, bioinformatics, and analysis protocols are credited to the TagSeq 
 
 ```{r setup, include=FALSE}
 # ---- user-configurable paths ----
-counts_file  <- "data/allcounts_ofav.txt"
-design_file  <- "data/design.csv"
-annotation_file <- "annot/Ofaveolata_iso2geneName.tab"  # optional (for cherry-picking)
+counts_file  <- "../../data/ofav/allcounts_ofav.txt"
+design_file  <- "../../data/design.csv"
+annotation_file <- "../../annot/Ofaveolata_iso2geneName.tab"  # optional (for cherry-picking)
+
+# ---- gene set to retain ----
+# "host" keeps coral genes, "sym" keeps symbiont genes
+gene_set <- "host"
+
+host_prefixes <- c("Ofaveolata", "Pclavus", "Acervicornis", "Pocillopora")
+sym_prefixes  <- c("Symbiodinium", "Breviolum", "Cladocopium", "Durusdinium")
+
+gene_prefixes <- switch(gene_set, host = host_prefixes, sym = sym_prefixes)
+gene_prefix_regex <- paste0("^(", paste(gene_prefixes, collapse = "|"), ")")
+
+# ---- species detection ----
+# species directory (e.g. "ofav") is taken from counts_file's parent folder,
+# and mapped to the matching code in design$species
+species_dir <- basename(dirname(counts_file))
+species_map <- c(acer = "Acer", ofav = "Ofav", pcla = "Pcla", poci = "Poci")
+species_code <- species_map[[species_dir]]
+
+# all outputs are written under data/<species_dir>/host/ or data/<species_dir>/sym/
+outdir <- file.path("..", "..", "data", species_dir, gene_set)
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+# all plots are written under figures/<species_dir>/host/ or figures/<species_dir>/sym/
+figdir <- file.path("..", "..", "figures", species_dir, gene_set)
+dir.create(figdir, showWarnings = FALSE, recursive = TRUE)
 
 # ---- analysis parameters ----
 min_row_sum_counts <- 10
 wgcna_min_count <- 10
 wgcna_max_prop_low <- 0.90
-outs <- c(0)     # outlier sample indices to remove (set to integer(0) if none)
+outs <- c(10)     # outlier sample indices to remove (set to integer(0) if none)
 alpha <- 0.10     # DESeq2 adjusted p-value threshold
 ```
 
@@ -80,23 +105,20 @@ suppressPackageStartupMessages({
 ```{r data-import}
 counts <- read.table(counts_file)
 
-# removing the parent sample (column 41 in original script)
-if (ncol(counts) >= 41) {
-  counts <- subset(counts, select = -c(41))
-}
+# retain only host or symbiont genes, based on gene_set above
+counts <- counts[grepl(gene_prefix_regex, rownames(counts)), ]
 
 keep <- rowSums(counts) >= min_row_sum_counts
 countData <- counts[keep, ]
 
-dir.create("outputs", showWarnings = FALSE)
-write.csv(countData, file = "outputs/countData.csv")
+write.csv(countData, file = file.path(outdir, "countData.csv"))
 
 # WGCNA-style filter: remove genes with counts < wgcna_min_count in >= wgcna_max_prop_low of samples
 counts4wgcna <- counts[apply(counts, 1, function(x) sum(x < wgcna_min_count)) < ncol(counts) * wgcna_max_prop_low, ]
-write.csv(counts4wgcna, file = "outputs/counts4wgcna.csv")
+write.csv(counts4wgcna, file = file.path(outdir, "counts4wgcna.csv"))
 
 design <- read.csv(design_file, head = TRUE)
-design <- design[design$genotype != "Parent", ]
+design <- design[design$species == species_code, ]
 stopifnot(nrow(design) == ncol(countData))
 str(design)
 ```
@@ -109,7 +131,7 @@ str(design)
 dds <- DESeqDataSetFromMatrix(countData = countData, colData = design, design = ~ genotype + fate)
 
 # set factor levels for fate
-dds$fate <- factor(dds$fate, levels = c("healthy", "nai", "diseased"))
+dds$fate <- factor(dds$fate, levels = c("Healthy", "NAI", "Diseased"))
 
 Vsd <- varianceStabilizingTransformation(dds)
 
@@ -117,7 +139,7 @@ e <- ExpressionSet(assay(Vsd), AnnotatedDataFrame(as.data.frame(colData(Vsd))))
 
 # arrayQualityMetrics creates an HTML report directory
 # If you knit on GitHub Actions, consider setting `force = TRUE` and `do.logtransform = FALSE`.
-arrayQualityMetrics(e, intgroup = c("fate"), force = TRUE)
+arrayQualityMetrics(e, outdir = file.path(outdir, "arrayQualityMetrics"), intgroup = c("fate"), force = TRUE)
 
 # remove outliers by index (if any)
 if (length(outs) > 0) {
@@ -129,21 +151,21 @@ if (length(outs) > 0) {
 
 # remake model after outlier removal
 dds <- DESeqDataSetFromMatrix(countData = countData, colData = design, design = ~ genotype + fate)
-dds$fate <- factor(dds$fate, levels = c("healthy", "nai", "diseased"))
+dds$fate <- factor(dds$fate, levels = c("Healthy", "NAI", "Diseased"))
 
-save(dds, design, countData, Vsd, counts4wgcna, file = "outputs/initial.RData")
+save(dds, design, countData, Vsd, counts4wgcna, file = file.path(outdir, "initial.RData"))
 
 # variance-stabilized matrix for ordination / heatmaps
 vsd <- assay(Vsd)
 snames <- paste(colnames(countData), design[, 4], design[, 6], sep = ".")
 colnames(vsd) <- snames
-save(vsd, design, file = "outputs/vsd.RData")
+save(vsd, design, file = file.path(outdir, "vsd.RData"))
 
 # WGCNA-ready VST (optional)
 wg <- DESeqDataSetFromMatrix(countData = counts4wgcna, colData = design, design = ~ genotype + fate)
 vsd.wg <- assay(varianceStabilizingTransformation(wg), blind = TRUE)
 colnames(vsd.wg) <- snames
-save(vsd.wg, design, file = "outputs/data4wgcna.RData")
+save(vsd.wg, design, file = file.path(outdir, "data4wgcna.RData"))
 ```
 
 ---
@@ -151,13 +173,13 @@ save(vsd.wg, design, file = "outputs/data4wgcna.RData")
 ## Heatmap, PCoA, PERMANOVA
 
 ```{r ordination}
-load("outputs/vsd.RData")
+load(file.path(outdir, "vsd.RData"))
 
 # sample correlation heatmap
-pheatmap(cor(vsd))
+pheatmap(cor(vsd), filename = file.path(figdir, "sample_heatmap.pdf"))
 
 conditions <- design
-conditions$fate <- factor(conditions$fate, levels = c("healthy", "nai", "diseased"))
+conditions$fate <- factor(conditions$fate, levels = c("Healthy", "NAI", "Diseased"))
 
 # PCoA (Manhattan distance; scaled to match original script)
 dds.pcoa <- pcoa(dist(t(vsd), method = "manhattan") / 1000)
@@ -165,33 +187,39 @@ scores <- dds.pcoa$vectors
 
 # eigenvalues (% variation explained in Relative_eig)
 dds.pcoa$values
+pdf(file.path(figdir, "pcoa_eigenvalues.pdf"))
 plot(dds.pcoa$values$Relative_eig, ylab = "Relative eigenvalue", xlab = "PCoA axis")
 points(dds.pcoa$values$Broken_stick, col = "red", pch = 3)
+dev.off()
 
 # plot by fate and treatment (if treatment column exists)
+pdf(file.path(figdir, "pcoa_scores.pdf"), width = 10, height = 5)
 par(mfrow = c(1, 2))
 plot(scores[, 1], scores[, 2],
      col = c("green", "orange", "red")[as.numeric(as.factor(conditions$fate))],
      xlab = "Coordinate 1", ylab = "Coordinate 2", main = "Fate")
 ordispider(scores, conditions$fate, label = FALSE, col = c("green", "orange", "red"))
-legend("topright", legend = c("healthy", "NAI", "diseased"), fill = c("green", "orange", "red"), bty = "n")
+legend("topright", legend = c("Healthy", "NAI", "Diseased"), fill = c("green", "orange", "red"), bty = "n")
 
 if ("treatment" %in% names(conditions)) {
   plot(scores[, 1], scores[, 2],
-       col = c("green", "black", "red")[as.numeric(as.factor(conditions$treatment))],
+       col = c("darkgreen", "lightgreen", "green", "cornflowerblue")[as.numeric(as.factor(conditions$treatment))],
        xlab = "Coordinate 1", ylab = "Coordinate 2", main = "Treatment")
-  ordispider(scores, conditions$treatment, label = FALSE, col = c("green", "black", "red"))
-  legend("topleft", legend = levels(as.factor(conditions$treatment)), fill = c("green", "red"), bty = "n")
+  ordispider(scores, conditions$treatment, label = FALSE, col = c("darkgreen", "lightgreen", "green", "cornflowerblue"))
+  legend("topleft", legend = levels(as.factor(conditions$treatment)), fill = c("darkgreen", "lightgreen", "green", "cornflowerblue"), bty = "n")
 }
 
 par(mfrow = c(1, 1))
+dev.off()
 
 # neighbor-joining tree using first 4 axes
 tre <- nj(dist(scores[, 1:4]))
+pdf(file.path(figdir, "nj_tree.pdf"))
 plot(tre, cex = 0.8)
+dev.off()
 
 # PERMANOVA
-ad <- adonis(t(vsd) ~ genotype + fate, data = conditions, method = "manhattan", permutations = 1e6)
+ad <- adonis2(t(vsd) ~ genotype + fate, data = conditions, method = "manhattan", permutations = 1e6)
 ad
 ```
 
@@ -200,16 +228,16 @@ ad
 ## DESeq2 models
 
 ```{r deseq-models}
-load("outputs/initial.RData")
+load(file.path(outdir, "initial.RData"))
 
 # full model (for contrasts)
 dds <- DESeq(dds, parallel = TRUE)
 
 # LRT for multi-level fate effect
-dds$fate <- factor(dds$fate, levels = c("healthy", "nai", "diseased"))
+dds$fate <- factor(dds$fate, levels = c("Healthy", "NAI", "Diseased"))
 dds_fate <- DESeq(dds, test = "LRT", reduced = ~ genotype, parallel = TRUE)
 
-save(dds, dds_fate, file = "outputs/realModels.RData")
+save(dds, dds_fate, file = file.path(outdir, "realModels.RData"))
 ```
 
 ---
@@ -217,34 +245,41 @@ save(dds, dds_fate, file = "outputs/realModels.RData")
 ## DEGs and contrasts
 
 ```{r degs}
-load("outputs/realModels.RData")
+load(file.path(outdir, "realModels.RData"))
 
 # main effects
 fate <- results(dds_fate)
+summary(fate)
 genotype <- results(dds)
+summary(genotype)
 
 degs_fate <- rownames(fate)[fate$padj < alpha & !is.na(fate$padj)]
 degs_genotype <- rownames(genotype)[genotype$padj < alpha & !is.na(genotype$padj)]
 
 # pairwise contrasts for fate
-diseased_healthy <- results(dds, contrast = c("fate", "diseased", "healthy"))
-nai_healthy      <- results(dds, contrast = c("fate", "nai", "healthy"))
-diseased_nai     <- results(dds, contrast = c("fate", "diseased", "nai"))
+diseased_healthy <- results(dds, contrast = c("fate", "Diseased", "Healthy"))
+summary(diseased_healthy)
+nai_healthy      <- results(dds, contrast = c("fate", "NAI", "Healthy"))
+summary(nai_healthy)
+diseased_nai     <- results(dds, contrast = c("fate", "Diseased", "NAI"))
+summary(diseased_nai)
 
 degs_diseased_healthy <- rownames(diseased_healthy)[diseased_healthy$padj < alpha & !is.na(diseased_healthy$padj)]
 degs_nai_healthy      <- rownames(nai_healthy)[nai_healthy$padj < alpha & !is.na(nai_healthy$padj)]
 degs_diseased_nai     <- rownames(diseased_nai)[diseased_nai$padj < alpha & !is.na(diseased_nai$padj)]
 
-save(fate, genotype, diseased_healthy, nai_healthy, diseased_nai, file = "outputs/pvals.RData")
+save(fate, genotype, diseased_healthy, nai_healthy, diseased_nai, file = file.path(outdir, "pvals.RData"))
 
 # DEG abundance density
-load("outputs/vsd.RData")
+load(file.path(outdir, "vsd.RData"))
 means <- apply(vsd, 1, mean)
 
+pdf(file.path(figdir, "deg_abundance_density.pdf"))
 plot(density(means), main = "Mean VST abundance density", xlab = "Mean VST")
 lines(density(means[degs_genotype]), col = "blue")
 lines(density(means[degs_fate]), col = "orange")
 legend("topright", title = "Factor", legend = c("genotype", "fate"), fill = c("blue", "orange"))
+dev.off()
 ```
 
 ---
@@ -252,39 +287,35 @@ legend("topright", title = "Factor", legend = c("genotype", "fate"), fill = c("b
 ## Venn diagrams
 
 ```{r venn}
-load("outputs/pvals.RData")
+load(file.path(outdir, "pvals.RData"))
 
 candidates <- list("genotype" = degs_genotype, "fate" = degs_fate)
 
 fullmodel_venn <- venn.diagram(
   x = candidates,
-  filename = NULL,
+  filename = file.path(figdir, "fullmodel_venn.png"),
   col = "transparent",
   fill = c("blue", "orange"),
   alpha = 0.5,
   cex = 1.5,
   fontfamily = "sans"
 )
-grid::grid.newpage()
-grid::grid.draw(fullmodel_venn)
 
 pairwise <- list(
-  "diseased_healthy" = degs_diseased_healthy,
-  "nai_healthy"      = degs_nai_healthy,
-  "diseased_nai"     = degs_diseased_nai
+  "Diseased_Healthy" = degs_diseased_healthy,
+  "NAI_Healthy"      = degs_nai_healthy,
+  "Diseased_NAI"     = degs_diseased_nai
 )
 
 pairwise_venn <- venn.diagram(
   x = pairwise,
-  filename = NULL,
+  filename = file.path(figdir, "pairwise_venn.png"),
   col = "transparent",
   fill = c("blue", "orange", "lightblue"),
   alpha = 0.5,
   cex = 1.2,
   fontfamily = "sans"
 )
-grid::grid.newpage()
-grid::grid.draw(pairwise_venn)
 ```
 
 ---
@@ -292,7 +323,7 @@ grid::grid.draw(pairwise_venn)
 ## GO/KOG export tables
 
 ```{r go-kog}
-load("outputs/pvals.RData")
+load(file.path(outdir, "pvals.RData"))
 
 # signed log p-values helper
 signed_logp <- function(res) {
@@ -306,8 +337,8 @@ signed_logp <- function(res) {
 genotype.p <- signed_logp(genotype)
 fate.p <- signed_logp(fate)
 
-write.csv(genotype.p, file = "outputs/genotype_lpv.csv", row.names = FALSE, quote = FALSE)
-write.csv(fate.p,     file = "outputs/fate_lpv.csv",     row.names = FALSE, quote = FALSE)
+write.csv(genotype.p, file = file.path(outdir, "genotype_lpv.csv"), row.names = FALSE, quote = FALSE)
+write.csv(fate.p,     file = file.path(outdir, "fate_lpv.csv"),     row.names = FALSE, quote = FALSE)
 
 # fold-change tables for pairwise contrasts
 fc_table <- function(res) {
@@ -315,13 +346,13 @@ fc_table <- function(res) {
   data.frame(gene = rownames(source), lfc = source$log2FoldChange)
 }
 
-write.csv(fc_table(diseased_healthy), file = "outputs/diseased_healthy_fc.csv", row.names = FALSE, quote = FALSE)
-write.csv(fc_table(nai_healthy),      file = "outputs/nai_healthy_fc.csv",      row.names = FALSE, quote = FALSE)
-write.csv(fc_table(diseased_nai),     file = "outputs/diseased_nai_fc.csv",     row.names = FALSE, quote = FALSE)
+write.csv(fc_table(diseased_healthy), file = file.path(outdir, "diseased_healthy_fc.csv"), row.names = FALSE, quote = FALSE)
+write.csv(fc_table(nai_healthy),      file = file.path(outdir, "nai_healthy_fc.csv"),      row.names = FALSE, quote = FALSE)
+write.csv(fc_table(diseased_nai),     file = file.path(outdir, "diseased_nai_fc.csv"),     row.names = FALSE, quote = FALSE)
 
-write.csv(signed_logp(diseased_healthy), file = "outputs/diseased_healthy_lpv.csv", row.names = FALSE, quote = FALSE)
-write.csv(signed_logp(nai_healthy),      file = "outputs/nai_healthy_lpv.csv",      row.names = FALSE, quote = FALSE)
-write.csv(signed_logp(diseased_nai),     file = "outputs/diseased_nai_lpv.csv",     row.names = FALSE, quote = FALSE)
+write.csv(signed_logp(diseased_healthy), file = file.path(outdir, "diseased_healthy_lpv.csv"), row.names = FALSE, quote = FALSE)
+write.csv(signed_logp(nai_healthy),      file = file.path(outdir, "nai_healthy_lpv.csv"),      row.names = FALSE, quote = FALSE)
+write.csv(signed_logp(diseased_nai),     file = file.path(outdir, "diseased_nai_lpv.csv"),     row.names = FALSE, quote = FALSE)
 ```
 
 ---
@@ -330,7 +361,7 @@ write.csv(signed_logp(diseased_nai),     file = "outputs/diseased_nai_lpv.csv", 
 
 ```{r cherrypick, eval=FALSE}
 # Set eval=TRUE if you have the annotation_file present in data/
-load("outputs/pvals.RData")
+load(file.path(outdir, "pvals.RData"))
 
 annot <- read.table(annotation_file, sep = "\t", quote = "", fill = FALSE) %>%
   mutate(gene = V1, annot = V2) %>%
@@ -344,7 +375,7 @@ cherrypicking <- diseased_healthy.p %>%
     "NF-kappaB|peroxidas|TGF-beta|protein tyrosine kinase|fibrinogen|WD repeat-containing protein|apoptosis|extracellular matrix"
   ))
 
-write.csv(cherrypicking, file = "outputs/trans_mcav_cherrypicking.csv", row.names = FALSE)
+write.csv(cherrypicking, file = file.path(outdir, "cherrypicking.csv"), row.names = FALSE)
 ```
 
 ---
@@ -352,7 +383,7 @@ write.csv(cherrypicking, file = "outputs/trans_mcav_cherrypicking.csv", row.name
 ## Gene-level exports (plotCounts)
 
 ```{r gene-counts}
-load("outputs/realModels.RData")
+load(file.path(outdir, "realModels.RData"))
 
 genes_of_interest <- c(
   "Mcavernosa14879","Mcavernosa98966","Mcavernosa64646","Mcavernosa69648",
@@ -364,14 +395,15 @@ genes_of_interest <- c(
   "Mcavernosa96261","Mcavernosa366959"
 )
 
-dir.create("outputs/gene_counts", showWarnings = FALSE)
+gene_counts_dir <- file.path(outdir, "gene_counts")
+dir.create(gene_counts_dir, showWarnings = FALSE)
 
 for (g in genes_of_interest) {
   df <- plotCounts(dds, gene = g, intgroup = "fate", returnData = TRUE)
-  write.csv(df, file = file.path("outputs/gene_counts", paste0(g, ".csv")), row.names = FALSE)
+  write.csv(df, file = file.path(gene_counts_dir, paste0(g, ".csv")), row.names = FALSE)
 }
 
-head(read.csv(file.path("outputs/gene_counts", paste0(genes_of_interest[1], ".csv"))))
+head(read.csv(file.path(gene_counts_dir, paste0(genes_of_interest[1], ".csv"))))
 ```
 
 ---
